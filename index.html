@@ -194,9 +194,38 @@ table.cal{width:100%;border-collapse:collapse;table-layout:fixed}table.cal th{fo
 .note-delete-btn{border:1px solid var(--line);background:#fff;color:#9A777F;border-radius:9px;padding:8px 11px;font-family:'Quicksand',sans-serif;font-size:10px;font-weight:700;cursor:pointer}
 .note-delete-btn:hover{background:#FFF5F6}
 @media(max-width:780px){.notes-head{display:block}.new-note-btn{margin-top:12px}.notes-layout{grid-template-columns:1fr}.notes-list-panel{min-height:auto}.note-editor{min-height:390px}}
+
+/* ===== SINCRONIZACIÓN EN LA NUBE ===== */
+#authGate{position:fixed;inset:0;background:rgba(252,249,250,.96);backdrop-filter:blur(8px);z-index:9999;display:flex;align-items:center;justify-content:center;padding:24px}
+.auth-card{width:min(420px,100%);background:#fff;border:1px solid var(--line);border-radius:24px;padding:32px;box-shadow:0 18px 60px rgba(72,48,60,.12);text-align:center}
+.auth-card .auth-mark{font-size:32px;color:var(--pink-600);margin-bottom:8px}
+.auth-card h2{font-family:'Fraunces',serif;font-weight:600;margin:0 0 8px;font-size:26px}
+.auth-card p{color:var(--ink-muted);font-size:13px;line-height:1.55;margin:0 0 22px}
+.auth-card label{display:block;text-align:left;font-size:12px;font-weight:700;margin:12px 0 6px}
+.auth-card input{width:100%;padding:12px 14px;border:1px solid var(--line);border-radius:12px;background:#fff;font:inherit;outline:none}
+.auth-card input:focus{border-color:var(--pink-400);box-shadow:0 0 0 3px var(--pink-100)}
+.auth-btn{width:100%;margin-top:18px;border:0;border-radius:13px;padding:12px 16px;background:var(--pink-600);color:#fff;font:700 13px 'Quicksand',sans-serif;cursor:pointer}
+.auth-msg{min-height:18px;margin-top:12px;font-size:12px;color:var(--pink-700)}
+.cloud-user{font-size:11px;color:var(--ink-muted);margin-left:8px}
+
 </style>
 </head>
 <body>
+<div id="authGate">
+  <div class="auth-card">
+    <div class="auth-mark">✦</div>
+    <h2>Mi Agenda Universitaria</h2>
+    <p>Inicia sesión para mantener tu agenda sincronizada entre tus dispositivos.</p>
+    <form id="authForm">
+      <label for="authEmail">Correo</label>
+      <input id="authEmail" type="email" autocomplete="email" required>
+      <label for="authPassword">Contraseña</label>
+      <input id="authPassword" type="password" autocomplete="current-password" required>
+      <button class="auth-btn" id="authBtn" type="submit">Iniciar sesión</button>
+      <div class="auth-msg" id="authMsg" aria-live="polite"></div>
+    </form>
+  </div>
+</div>
 <div class="app">
   <aside class="sidebar">
     <div class="brand">
@@ -222,7 +251,7 @@ table.cal{width:100%;border-collapse:collapse;table-layout:fixed}table.cal th{fo
       </div>
       <div class="top-actions">
         <button class="save-all-btn" id="saveAllBtn" type="button">♡ Guardar cambios</button>
-        <span class="save-status" id="saveStatus" aria-live="polite"></span>
+        <span class="save-status" id="saveStatus" aria-live="polite"></span><span class="cloud-user" id="cloudUser"></span>
         <div class="today-pill"><div class="lbl">Hoy</div><div class="num" id="todayNum"></div></div>
       </div>
     </header>
@@ -383,6 +412,7 @@ table.cal{width:100%;border-collapse:collapse;table-layout:fixed}table.cal th{fo
   </main>
 </div>
 
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
 const SUBJECTS = [
   {id:'civil6', short:'Civil VI', name:'Derecho Civil VI', bg:'var(--civil6-bg)', dot:'var(--civil6-dot)', text:'var(--civil6-text)'},
@@ -430,35 +460,68 @@ let activeNoteId = null;
 let calYear, calMonth; // 0-indexed month
 const today = new Date();
 today.setHours(0,0,0,0);
-const STORAGE_KEYS = ['pendientes','links','eventos','workspaceCategories','subjectTopics'];
+const STORAGE_KEYS = ['pendientes','links','eventos','workspaceCategories','subjectTopics','notas'];
 
-async function storageGet(key){
-  try{
-    if(window.storage && typeof window.storage.get === 'function'){
-      const r = await window.storage.get(key, false);
-      if(r && r.value !== undefined) return r.value;
-    }
-  }catch(e){ console.warn('Storage externo no disponible para', key, e); }
-  try{
-    return window.localStorage.getItem('miAgenda_' + key);
-  }catch(e){
-    return null;
-  }
+const SUPABASE_URL = 'https://wgjkqwvxfitfihbgnebk.supabase.co';
+const SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_RUJ68eTsjBpsbv7xyOfKdg_-d26p8gQ';
+const supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY);
+let cloudRowId = null;
+let cloudState = {};
+
+function localStorageGet(key){
+  try{return window.localStorage.getItem('miAgenda_' + key);}catch(e){return null;}
+}
+function localStorageSet(key,value){
+  try{window.localStorage.setItem('miAgenda_' + key,value);return true;}catch(e){return false;}
 }
 
-async function storageSet(key, value){
-  let saved = false;
+async function ensureCloudRow(){
+  const {data:userData,error:userError}=await supabaseClient.auth.getUser();
+  if(userError || !userData.user) throw new Error('Sesión no disponible.');
+  const userId=userData.user.id;
+  const {data,error}=await supabaseClient.from('agenda_data').select('id,data').eq('user_id',userId).limit(1).maybeSingle();
+  if(error) throw error;
+  if(data){
+    cloudRowId=data.id;
+    cloudState=(data.data && typeof data.data==='object') ? data.data : {};
+    return;
+  }
+  // Migración inicial: si existe información local en este dispositivo, la conserva.
+  const migrated={};
+  for(const key of STORAGE_KEYS){
+    const v=localStorageGet(key);
+    if(v!==null){try{migrated[key]=JSON.parse(v);}catch(e){}}
+  }
+  const payload={user_id:userId,data:migrated,updated_at:new Date().toISOString()};
+  const ins=await supabaseClient.from('agenda_data').insert(payload).select('id,data').single();
+  if(ins.error) throw ins.error;
+  cloudRowId=ins.data.id;
+  cloudState=migrated;
+}
+
+async function storageGet(key){
+  if(cloudState && Object.prototype.hasOwnProperty.call(cloudState,key)){
+    return JSON.stringify(cloudState[key]);
+  }
+  return localStorageGet(key);
+}
+
+async function storageSet(key,value){
   try{
-    if(window.storage && typeof window.storage.set === 'function'){
-      await window.storage.set(key, value, false);
-      saved = true;
-    }
-  }catch(e){ console.warn('Storage externo no disponible para', key, e); }
-  try{
-    window.localStorage.setItem('miAgenda_' + key, value);
-    saved = true;
-  }catch(e){ console.warn('localStorage no disponible', e); }
-  return saved;
+    cloudState[key]=JSON.parse(value);
+    if(!cloudRowId) await ensureCloudRow();
+    const {error}=await supabaseClient.from('agenda_data').update({
+      data:cloudState,
+      updated_at:new Date().toISOString()
+    }).eq('id',cloudRowId);
+    if(error) throw error;
+    localStorageSet(key,value);
+    return true;
+  }catch(e){
+    console.error('No se pudo sincronizar',key,e);
+    localStorageSet(key,value);
+    return false;
+  }
 }
 
 async function loadState(){
@@ -1200,7 +1263,48 @@ function setupTabs(){
     });
   });
 }
-async function init(){
+async function authenticateAgenda(){
+  const gate=document.getElementById('authGate');
+  const form=document.getElementById('authForm');
+  const msg=document.getElementById('authMsg');
+  const btn=document.getElementById('authBtn');
+
+  const {data:{session}}=await supabaseClient.auth.getSession();
+  if(session){
+    gate.style.display='none';
+    await ensureCloudRow();
+    document.getElementById('cloudUser').textContent=session.user.email;
+    return true;
+  }
+
+  form.addEventListener('submit',async(e)=>{
+    e.preventDefault();
+    msg.textContent='Conectando…';
+    btn.disabled=true;
+    const email=document.getElementById('authEmail').value.trim();
+    const password=document.getElementById('authPassword').value;
+    const {data,error}=await supabaseClient.auth.signInWithPassword({email,password});
+    if(error){
+      msg.textContent='No se pudo iniciar sesión. Revisa el correo y la contraseña.';
+      btn.disabled=false;
+      return;
+    }
+    gate.style.display='none';
+    document.getElementById('cloudUser').textContent=data.user.email;
+    try{
+      await ensureCloudRow();
+      await startAgendaAfterAuth();
+    }catch(err){
+      console.error(err);
+      msg.textContent='Se inició sesión, pero no se pudo conectar la agenda con la nube.';
+      gate.style.display='flex';
+      btn.disabled=false;
+    }
+  });
+  return false;
+}
+
+async function initOriginal(){
   const now=new Date();
   calYear=now.getFullYear();
   calMonth=now.getMonth();
@@ -1257,7 +1361,19 @@ async function init(){
     if(e.key==='Enter') addEvent();
   });
 }
-init();
+
+async function startAgendaAfterAuth(){
+  await initOriginal();
+}
+(async()=>{
+  try{
+    const authenticated=await authenticateAgenda();
+    if(authenticated) await initOriginal();
+  }catch(e){
+    console.error('Error al iniciar Mi Agenda',e);
+    document.getElementById('authMsg').textContent='No se pudo conectar con la nube. Revisa la configuración de Supabase.';
+  }
+})();
 </script>
 <script>if("serviceWorker" in navigator){window.addEventListener("load",()=>navigator.serviceWorker.register("sw.js").catch(()=>{}));}</script>
 </body>
